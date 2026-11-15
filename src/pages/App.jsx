@@ -1,5 +1,5 @@
 import { invoke } from '@tauri-apps/api/core'
-import { useState, useRef, useEffect, useCallback } from 'react'
+import { useState, useRef, useEffect, useCallback, useMemo } from 'react'
 import { unzipSync } from 'fflate'
 import createVerovioModule from 'verovio/wasm'
 import { VerovioToolkit } from 'verovio/esm'
@@ -12,6 +12,7 @@ import { isMobile } from '../lib/platform'
 import { enableMidi, listenToDevice, notesMatch, onDevicesChanged } from '../input/midiInput'
 import { startBasicPitchDetection, loadBasicPitchModel, isBasicPitchReady } from '../input/pitchDetector'
 import { StepGate } from '../practice/stepGate'
+import { fitTimelineToRange } from '../practice/keyboardFit'
 import { parseNoteTimelineOSMD } from '../parsers/osmdParser'
 import { tickToSec } from '../parsers/parseTimeline'
 import Background from '../Background'
@@ -120,6 +121,10 @@ function App() {
   })
   const [keyboardRange, setKeyboardRange] = useState(null)
   const [rangeSetup, setRangeSetup] = useState(null)
+  const [fitKeyboard, setFitKeyboard] = useState(() => {
+    try { return localStorage.getItem('nf-fit-keyboard') !== 'false' }
+    catch { return true }
+  })
   const [lumiStatus, setLumiStatus] = useState('')
   const lumiQueue = useRef(Promise.resolve())
   const [midiSupported, setMidiSupported] = useState(null)
@@ -133,6 +138,13 @@ function App() {
   const [showDebug, setShowDebug] = useState(false)
   const [debugLog, setDebugLog] = useState([])
 
+  const keyboardFit = useMemo(() => fitTimelineToRange(noteTimeline,
+    fitKeyboard && inputMode === 'midi' ? keyboardRange : null),
+  [noteTimeline, fitKeyboard, inputMode, keyboardRange])
+  const fitActive = fitKeyboard && inputMode === 'midi' && !!keyboardRange && !keyboardFit.error
+  const playableTimeline = fitActive ? keyboardFit.timeline : noteTimeline
+  const matchAnyOctave = anyOctave && !fitActive
+
   const fileInputRef = useRef(null)
   const svgContainerRef = useRef(null)   // Verovio SVG output container
   const vrvRef = useRef(null)            // VerovioToolkit instance
@@ -145,7 +157,7 @@ function App() {
   const toneListenRafRef = useRef(null)
   const listenEndWallSecRef = useRef(0)  // total wall-clock duration at current playback speed
   const listenTotalMusicalSecRef = useRef(0) // total musical duration (at original tempo)
-  const vrvCursorScheduleRef = useRef(null) // [{tstampMs, ids[]}] — cursor highlight events
+  const vrvCursorScheduleRef = useRef(null) // [{tstampMs, ids[]}] - cursor highlight events
 
   const stopMicRef = useRef(null)
   const wrongTimerRef = useRef(null)
@@ -173,10 +185,10 @@ function App() {
 
   useEffect(() => { musicXmlRef.current = musicXml }, [musicXml])
   useEffect(() => { currentNoteIndexRef.current = currentNoteIndex }, [currentNoteIndex])
-  useEffect(() => { noteTimelineRef.current = noteTimeline }, [noteTimeline])
+  useEffect(() => { noteTimelineRef.current = playableTimeline }, [playableTimeline])
   useEffect(() => { completedRef.current = completed }, [completed])
   useEffect(() => { pausedRef.current = paused }, [paused])
-  useEffect(() => { anyOctaveRef.current = anyOctave }, [anyOctave])
+  useEffect(() => { anyOctaveRef.current = matchAnyOctave }, [matchAnyOctave])
   useEffect(() => { modeRef.current = mode }, [mode])
   useEffect(() => { autoscrollRef.current = autoscroll }, [autoscroll])
   useEffect(() => { playbackSpeedRef.current = playbackSpeed }, [playbackSpeed])
@@ -184,6 +196,9 @@ function App() {
   useEffect(() => {
     try { localStorage.setItem('nf-lumi-cues', String(lumiCues)) } catch {}
   }, [lumiCues])
+  useEffect(() => {
+    try { localStorage.setItem('nf-fit-keyboard', String(fitKeyboard)) } catch {}
+  }, [fitKeyboard])
   useEffect(() => { localStorage.setItem('nf-default-bpm', String(defaultBpm)) }, [defaultBpm])
   useEffect(() => { setBpmInput(bpm != null ? String(bpm) : '') }, [bpm])
   useEffect(() => { setDefaultBpmInput(String(defaultBpm)) }, [defaultBpm])
@@ -230,7 +245,7 @@ function App() {
     return () => window.removeEventListener('keydown', onKey)
   }, [])
 
-  // Init SplendidGrandPiano — lazy-loading, no upfront wait required
+  // Init SplendidGrandPiano - lazy-loading, no upfront wait required
   useEffect(() => {
     Tone.getTransport().PPQ = 960
     const audioCtx = Tone.getContext().rawContext
@@ -286,7 +301,7 @@ function App() {
         })
       } catch {
         // navigator.permissions.query unsupported (Tauri WebView, Firefox, etc.)
-        // Don't show the prompt — let getUserMedia surface the real error when needed
+        // Don't show the prompt - let getUserMedia surface the real error when needed
       }
     }
     checkMicPermission()
@@ -294,7 +309,7 @@ function App() {
 
   useEffect(() => {
     if (!lumiCues || isMobile || mode !== 'practice' || paused || completed) return
-    const notes = (noteTimeline[currentNoteIndex]?.notes ?? [])
+    const notes = (playableTimeline[currentNoteIndex]?.notes ?? [])
       .map(noteNameToMidi)
       .filter((note) => Number.isInteger(note) && note >= 0 && note <= 127)
     if (!notes.length) return
@@ -314,7 +329,7 @@ function App() {
         invoke('set_lumi_cue', { notes: [] }).catch(() => {}),
       )
     }
-  }, [lumiCues, mode, paused, completed, noteTimeline, currentNoteIndex])
+  }, [lumiCues, mode, paused, completed, playableTimeline, currentNoteIndex])
 
   // Probe MIDI on mount (skipped on mobile: microphone is the only input)
   useEffect(() => {
@@ -381,7 +396,7 @@ function App() {
   }, [musicXml, pushDebug, defaultBpm])
 
   // ---------------------------------------------------------------------------
-  // Verovio — render MusicXML to SVG
+  // Verovio - render MusicXML to SVG
   // ---------------------------------------------------------------------------
   useEffect(() => {
     if (!musicXml) {
@@ -429,7 +444,7 @@ function App() {
       }
 
       if (cancelled || !svgContainerRef.current) return
-      // Verovio SVG is generated by a trusted C++ renderer — user-provided MusicXML
+      // Verovio SVG is generated by a trusted C++ renderer - user-provided MusicXML
       // is parsed internally and never passed through to the SVG output as-is,
       // so there is no XSS risk from skipping sanitization here.
       svgContainerRef.current.innerHTML = svgHtml
@@ -439,7 +454,7 @@ function App() {
       try {
         tk.renderToMIDI()  // populates getMIDIValuesForElement data needed for cursor IDs
         const timemap = tk.renderToTimemap()
-        const cursorEvents = []  // {tstampMs, ids[]} — bypasses getElementsAtTime for cursor
+        const cursorEvents = []  // {tstampMs, ids[]} - bypasses getElementsAtTime for cursor
         for (const ev of timemap) {
           const tstampMs = ev.tstamp ?? 0
           const noteIds = []
@@ -582,7 +597,7 @@ function App() {
   // ---------------------------------------------------------------------------
 
   // Move the cursor to the next step (or finish). Called when a step's written
-  // time is up — see startStepWait.
+  // time is up - see startStepWait.
   const doAdvance = useCallback(() => {
     const nextIdx = currentNoteIndexRef.current + 1
     if (nextIdx >= noteTimelineRef.current.length) {
@@ -891,7 +906,7 @@ function App() {
     setMusicXml(data)
   }
 
-  // ── Folder picker (home screen) ──────────────────────────────────────────────
+  // �� Folder picker (home screen) ����������������������������������������������
   async function handlePickFolder() {
     const picked = await pickFolder()
     if (!picked) return
@@ -927,7 +942,7 @@ function App() {
   }
 
   // Apply a user-chosen BPM by scaling the parsed timeline's absolute times.
-  // cursorSec is intentionally left at score tempo — Verovio's timemap is in
+  // cursorSec is intentionally left at score tempo - Verovio's timemap is in
   // score-tempo milliseconds, and the cursor lookup depends on that.
   // Like playback speed, the change takes effect the next time listen starts.
   function handleBpmChange(newBpm) {
@@ -968,13 +983,13 @@ function App() {
   }
 
   // ---------------------------------------------------------------------------
-  // Tone.js cursor sync loop (rAF — reads transport.seconds, drives Verovio cursor)
+  // Tone.js cursor sync loop (rAF - reads transport.seconds, drives Verovio cursor)
   // ---------------------------------------------------------------------------
   function startToneListenLoop() {
     stopToneListenLoop()
 
     function frame() {
-      // transport.bpm = 60, so transport.seconds ≈ wall-clock seconds elapsed
+      // transport.bpm = 60, so transport.seconds ~ wall-clock seconds elapsed
       const wallSec = Tone.getTransport().seconds
       const speed = playbackSpeedRef.current
       const musicalSec = wallSec * speed  // position in original-tempo seconds
@@ -1020,7 +1035,7 @@ function App() {
   }
 
   // ---------------------------------------------------------------------------
-  // Listen mode — Tone.js Transport + Sampler for audio, rAF loop for cursor
+  // Listen mode - Tone.js Transport + Sampler for audio, rAF loop for cursor
   // ---------------------------------------------------------------------------
   async function handleListen() {
     if (mode === 'listen') {
@@ -1056,11 +1071,11 @@ function App() {
     transport.bpm.value = 60
     transport.position = 0
 
-    // Use OSMD noteTimeline for audio — correct flat MIDI via getHalfTone()
-    const events = noteTimeline.flatMap((entry) =>
+    // Demonstrate the same arrangement as the lit keys and practice targets.
+    const events = playableTimeline.flatMap((entry) =>
       entry.notes.flatMap((name) => {
         const midi = noteNameToMidi(name)
-        if (!midi) return []
+        if (midi === null) return []
         return [[
           (entry.timeSec ?? 0) / speed,
           { note: midi, durationSec: Math.max(entry.durationSec ?? 0.1, 0.05) / speed },
@@ -1194,6 +1209,19 @@ function App() {
     lastTickSetRef.current = -1
   }
 
+  function handleFitKeyboardChange(enabled) {
+    // Change the arrangement in place, without restarting the piece. Forget
+    // partial/early presses and pending timing tied to the previous targets.
+    resetStepState()
+    heldNotesRef.current.clear()
+    setDetectedNote(null)
+    setShowHint(false)
+    wrongCountRef.current = 0
+    clearTimeout(wrongTimerRef.current)
+    wrongTimerRef.current = null
+    setFitKeyboard(enabled)
+  }
+
   // Navigation
   function handlePrevMoment() {
     lastTickSetRef.current = -1
@@ -1233,7 +1261,7 @@ function App() {
   // ---------------------------------------------------------------------------
   // Derived display values
   // ---------------------------------------------------------------------------
-  const currentEntry = noteTimeline[currentNoteIndex]
+  const currentEntry = playableTimeline[currentNoteIndex]
   // Match the target, MIDI input and score parser (Pianly labels MIDI 60 as C3).
   const rangeLabel = (pitch) => midiToNoteName(pitch) + ' (MIDI ' + pitch + ')'
   const outsideRange = keyboardRange && currentEntry
@@ -1244,9 +1272,9 @@ function App() {
   const totalMeasures = noteTimeline.length > 0 ? noteTimeline[noteTimeline.length - 1].measure : 0
   const isMatch = mode === 'practice' && detectedNote && currentEntry &&
     currentEntry.notes.some((tn) =>
-      [...heldNotesRef.current].some((held) => notesMatch(held, tn, anyOctave))
+      [...heldNotesRef.current].some((held) => notesMatch(held, tn, matchAnyOctave))
     )
-  const prevEntry = currentNoteIndex > 0 ? noteTimeline[currentNoteIndex - 1] : null
+  const prevEntry = currentNoteIndex > 0 ? playableTimeline[currentNoteIndex - 1] : null
   const intervalName = currentEntry && prevEntry ? getInterval(prevEntry.notes, currentEntry.notes) : null
 
   const selectedDevice = midiDevices.find((d) => d.id === selectedDeviceId)
@@ -1266,9 +1294,9 @@ function App() {
     <div className="h-screen overflow-hidden relative" style={{ background: 'var(--bg)', color: 'var(--ink)', fontFamily: "'Sora', sans-serif" }}>
       <Background />
 
-      {/* ════════════════════════════════════════════════════════
+      {/* ��������������������������������������������������������
           HOME SCREEN
-      ════════════════════════════════════════════════════════ */}
+      �������������������������������������������������������� */}
       {!musicXml && (
         <div style={{display:'grid',gridTemplateRows:'auto 1fr clamp(107px,19.3vh,235px)',position:'absolute',inset:0,fontFamily:"'Sora',sans-serif",background:'var(--bg)',color:'var(--ink)',overflow:'hidden'}}>
           {/* Header */}
@@ -1277,19 +1305,19 @@ function App() {
             <button onClick={()=>setShowHomeSettings(true)} style={{opacity:.6,background:'none',border:'none',cursor:'pointer',fontSize:'clamp(11px,1.1vw,13px)',color:'var(--ink)',fontFamily:"'Sora',sans-serif"}}>Settings</button>
           </nav>
 
-          {/* Hero row — fills all remaining space between nav and piano */}
+          {/* Hero row - fills all remaining space between nav and piano */}
           <div style={{display:'flex',position:'relative',overflow:'hidden',minHeight:0}}>
             {/* Ambient glows */}
             <div style={{position:'absolute',top:'-15%',right:'-5%',width:'50vw',height:'50vw',background:'radial-gradient(circle, rgba(0,255,200,0.18), transparent)',filter:'blur(70px)',borderRadius:'50%',zIndex:0,pointerEvents:'none'}}/>
             <div style={{position:'absolute',bottom:'-25%',left:'-15%',width:'40vw',height:'40vw',background:'radial-gradient(circle, rgba(0,255,200,0.1), transparent)',filter:'blur(60px)',borderRadius:'50%',zIndex:0,pointerEvents:'none'}}/>
 
-            {/* Left: headline — exactly 50% */}
+            {/* Left: headline - exactly 50% */}
             <div style={{flex:'0 0 50%',padding:'clamp(24px,4vh,56px) clamp(20px,4vw,56px)',display:'flex',flexDirection:'column',justifyContent:'center',position:'relative',zIndex:1}}>
               <div style={{fontFamily:"'Dancing Script','Pacifico',cursive",fontSize:'clamp(72px,10vw,156px)',fontWeight:700,lineHeight:0.9,margin:'0 0 clamp(10px,1.5vh,24px)',color:'var(--accent)',letterSpacing:'-0.01em'}}>Pianly</div>
               <p style={{fontSize:'clamp(15px,1.6vw,26px)',fontWeight:600,color:'var(--accent)',lineHeight:1.3,margin:0,fontFamily:"'Sora',sans-serif"}}>A practice engine for all.</p>
             </div>
 
-            {/* Right: button grid — exactly 50% */}
+            {/* Right: button grid - exactly 50% */}
             <div style={{flex:'0 0 50%',padding:'clamp(24px,4vh,56px) clamp(20px,4vw,56px)',display:'grid',gridTemplateColumns:'repeat(2,1fr)',gap:'clamp(8px,1.2vh,16px)',alignContent:'center',position:'relative',zIndex:1}}>
               {[
                 {label:'Sheet Practice', action: ()=>setShowSheetPicker(true), delay:'0.3s'},
@@ -1326,7 +1354,7 @@ function App() {
             </div>
           </div>
 
-          {/* Piano — fixed at the very bottom, height scales with viewport */}
+          {/* Piano - fixed at the very bottom, height scales with viewport */}
           <svg style={{width:'100%',display:'block',height:'100%'}} viewBox="0 0 1200 130" xmlns="http://www.w3.org/2000/svg" preserveAspectRatio="none">
             <rect x="0" y="0" width="1200" height="5" fill="rgba(0,255,200,0.5)"/>
             <g fill="#e8ecef" stroke="rgba(0,0,0,0.5)" strokeWidth="1.5">
@@ -1350,7 +1378,7 @@ function App() {
         className="hidden"
       />
 
-      {/* ── Home Settings Modal ────────────────────────────────────────────── */}
+      {/* �� Home Settings Modal ���������������������������������������������� */}
       {showHomeSettings && (
         <div
           className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm px-4 py-6"
@@ -1360,7 +1388,7 @@ function App() {
             className="w-full max-w-sm md:max-w-lg rounded-2xl shadow-2xl shadow-black/60 flex flex-col max-h-[90vh]"
             style={{ background: 'var(--panel)', border: '1px solid var(--border)', backdropFilter: 'blur(24px)', WebkitBackdropFilter: 'blur(24px)' }}
           >
-            {/* Header — sticky */}
+            {/* Header - sticky */}
             <div className="flex items-center justify-between px-6 pt-6 pb-4 border-b shrink-0" style={{borderColor:'var(--border)'}}>
               <h2 className="text-base md:text-lg font-bold" style={{color:'var(--ink)'}}>Settings</h2>
               <button
@@ -1447,9 +1475,9 @@ function App() {
         </div>
       )}
 
-        {/* ════════════════════════════════════════════════════════
+        {/* ��������������������������������������������������������
             PRACTICE / LISTEN SCREEN (musicXml loaded)
-        ════════════════════════════════════════════════════════ */}
+        �������������������������������������������������������� */}
         {musicXml && (
           <div className="relative z-10 flex flex-col items-center px-4 sm:px-6 pt-4 sm:pt-6 pb-4 h-full overflow-y-auto [@media(max-height:500px)]:pt-2">
             {/* Thin top bar */}
@@ -1566,6 +1594,24 @@ function App() {
                 {inputMode === 'midi' && selectedDeviceId && (
                   <div className="mt-2">
                     {keyboardRange && <p>Keyboard range: {rangeLabel(keyboardRange.low)} to {rangeLabel(keyboardRange.high)}</p>}
+                    <label className="block mt-2">
+                      <input type="checkbox" checked={fitKeyboard} disabled={mode === 'listen'}
+                        onChange={(event) => handleFitKeyboardChange(event.target.checked)} />
+                      {' '}Fit to my keyboards
+                    </label>
+                    {fitKeyboard && !keyboardRange && (
+                      <p>Check your lowest and highest keys once before practice to fit the song to your keyboards.</p>
+                    )}
+                    {keyboardFit.error && <p role="status" className="text-amber-400">{keyboardFit.error}</p>}
+                    {fitActive && (
+                      <p role="status">
+                        {keyboardFit.adjustedNotes > 0
+                          ? 'Octaves adapted to your keys. Follow the lit keys and Target notes; Listen plays this adapted version. The sheet stays as written.'
+                          : 'This piece fits your checked range.'}
+                        {' '}Keep the hardware octave setting fixed while playing.
+                        {keyboardFit.mergedNotes > 0 && ' Some octave doubles share one key in this arrangement.'}
+                      </p>
+                    )}
                     {mode === 'idle' && !rangeSetup && (
                       <button type="button" className="underline cursor-pointer"
                         onClick={() => setRangeSetup({})}>
@@ -1596,7 +1642,7 @@ function App() {
                       <p role="status" className="text-amber-400">
                         Outside the checked keyboard range: {outsideRange.map(rangeLabel).join(', ')}.
                         No key can light for those notes at this octave setting.
-                        If you shift octaves, stop practice and recheck the range.
+                        Enable Fit to my keyboards to continue here with playable notes.
                       </p>
                     )}
                   </div>
@@ -1614,7 +1660,7 @@ function App() {
               {inputMode === 'mic' ? (
                 <>
                   <span className={`inline-block w-1.5 h-1.5 rounded-full ${modelLoading ? 'animate-pulse' : ''}`} style={{background:'var(--accent)'}} />
-                  <span>Microphone (Basic Pitch){modelLoading && ' — loading model...'}</span>
+                  <span>Microphone (Basic Pitch){modelLoading && ' - loading model...'}</span>
                 </>
               ) : selectedDevice ? (
                 <>
@@ -1624,7 +1670,7 @@ function App() {
               ) : midiSupported === false && !isMobile ? (
                 <>
                   <span className="inline-block w-1.5 h-1.5 rounded-full bg-red-400" />
-                  <span>MIDI requires Chrome or Edge — switch to Microphone in settings</span>
+                  <span>MIDI requires Chrome or Edge - switch to Microphone in settings</span>
                 </>
               ) : (
                 <>
@@ -1632,7 +1678,7 @@ function App() {
                   <span>Connect a MIDI keyboard via USB to start</span>
                 </>
               )}
-              {anyOctave && <><span className="mx-1" style={{color:'var(--border)'}}>|</span><span>Any octave</span></>}
+              {matchAnyOctave && <><span className="mx-1" style={{color:'var(--border)'}}>|</span><span>Any octave</span></>}
             </div>
 
             {/* Sheet + practice panel wrapper */}
@@ -1658,6 +1704,12 @@ function App() {
                         <div className="text-center">
                           <div className="text-[10px] uppercase tracking-wider" style={{color:'var(--sub)'}}>Target</div>
                           <div className="text-lg font-bold font-mono leading-tight" style={{color:'var(--ink)'}}>{currentNoteDisplay}</div>
+                          {currentEntry.octaveAdjusted && (
+                            <div className="text-xs mt-1" style={{color:'var(--sub)'}}>
+                              Written: {currentEntry.writtenNotes.join(' + ')}
+                              {currentEntry.mergedNotes > 0 && ' (octave doubles combined)'}
+                            </div>
+                          )}
                         </div>
                         <div className="text-center">
                           <div className="text-[10px] uppercase tracking-wider" style={{color:'var(--sub)'}}>Playing</div>
@@ -1692,7 +1744,7 @@ function App() {
                 <div className="sticky top-0 z-20 rounded-xl backdrop-blur-md px-6 py-4 text-center mb-3" style={{border:'1px solid rgba(0,255,200,0.25)',background:'rgba(0,255,200,0.06)'}}>
                   <p className="font-bold" style={{color:'var(--accent)'}}>Paused</p>
                   <p className="text-sm mt-1" style={{color:'var(--sub)'}}>
-                    Note {currentNoteIndex + 1} of {noteTimeline.length} · Bar {currentEntry?.measure}/{totalMeasures}
+                    Note {currentNoteIndex + 1} of {noteTimeline.length} � Bar {currentEntry?.measure}/{totalMeasures}
                   </p>
                 </div>
               )}
@@ -1723,11 +1775,11 @@ function App() {
               {/* Completion */}
               {completed && (
                 <div className="mt-4 rounded-2xl backdrop-blur-sm px-6 sm:px-8 py-10 text-center" style={{border:'1px solid rgba(0,255,200,0.2)',background:'rgba(0,255,200,0.04)'}}>
-                  <div className="text-5xl mb-4">🎹</div>
+                  <div className="text-5xl mb-4">??</div>
                   <p className="text-2xl font-bold mb-2" style={{color:'var(--ink)'}}>You finished!</p>
                   <p className="text-sm mb-1" style={{color:'var(--sub)'}}>{filename}</p>
                   <p className="text-sm mb-8" style={{color:'var(--sub)',opacity:.6}}>
-                    {noteTimeline.length} notes · {totalMeasures} measures
+                    {noteTimeline.length} notes � {totalMeasures} measures
                   </p>
                   <div className="flex flex-col sm:flex-row items-center justify-center gap-3">
                     <button onClick={handleRestart} className="w-full sm:w-auto px-6 py-2.5 rounded-xl font-bold text-sm transition-all cursor-pointer" style={{background:'var(--accent)',color:'#000',boxShadow:'0 8px 24px rgba(0,255,200,0.25)'}}>
@@ -1744,7 +1796,7 @@ function App() {
         )}
 
         {/* Demo picker modal */}
-        {/* ── Sheet Picker modal ──────────────────────────────────────────── */}
+        {/* �� Sheet Picker modal �������������������������������������������� */}
         {showSheetPicker && (
           <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-md px-4 py-4"
             onClick={e => { if (e.target === e.currentTarget) setShowSheetPicker(false) }}>
@@ -1877,13 +1929,13 @@ function App() {
               )}
 
               <div className="mb-5">
-                <button onClick={() => setAnyOctave((v) => !v)} className="flex items-center justify-between w-full p-3 rounded-xl transition-colors cursor-pointer" style={{border:'1px solid var(--border)'}}>
+                <button disabled={fitActive} onClick={() => setAnyOctave((v) => !v)} className="flex items-center justify-between w-full p-3 rounded-xl transition-colors cursor-pointer disabled:opacity-50" style={{border:'1px solid var(--border)'}}>
                   <div className="text-left">
                     <div className="text-sm font-medium" style={{color:'var(--ink)'}}>Any octave</div>
-                    <div className="text-xs mt-0.5" style={{color:'var(--sub)'}}>C3 matches target C4, etc.</div>
+                    <div className="text-xs mt-0.5" style={{color:'var(--sub)'}}>{fitActive ? 'Fit mode checks the exact lit keys.' : 'C3 matches target C4, etc.'}</div>
                   </div>
-                  <div className="w-10 h-6 rounded-full relative transition-colors" style={{background: anyOctave ? 'var(--accent)' : 'var(--panel)'}}>
-                    <div className={`absolute top-1 w-4 h-4 rounded-full bg-white transition-all ${anyOctave ? 'left-5' : 'left-1'}`} />
+                  <div className="w-10 h-6 rounded-full relative transition-colors" style={{background: matchAnyOctave ? 'var(--accent)' : 'var(--panel)'}}>
+                    <div className={`absolute top-1 w-4 h-4 rounded-full bg-white transition-all ${matchAnyOctave ? 'left-5' : 'left-1'}`} />
                   </div>
                 </button>
               </div>
@@ -1908,7 +1960,7 @@ function App() {
                       className="w-24 rounded-lg px-3 py-2 text-sm focus:outline-none transition-colors"
                       style={{background:'var(--bg)',border:'1px solid var(--border)',color:'var(--ink)'}}
                     />
-                    <span className="text-xs" style={{color:'var(--sub)',opacity:.6}}>30–240</span>
+                    <span className="text-xs" style={{color:'var(--sub)',opacity:.6}}>30-240</span>
                     {scoreBpm != null && bpm !== scoreBpm && (
                       <button onClick={() => handleBpmChange(scoreBpm)} className="ml-auto text-xs font-medium cursor-pointer" style={{color:'var(--accent)'}}>
                         Reset to {scoreBpm}
@@ -1999,7 +2051,7 @@ function App() {
         </div>
       )}
 
-      {/* Floating playback controls — listen mode */}
+      {/* Floating playback controls - listen mode */}
       {mode === 'listen' && (
         <div className="fixed bottom-6 right-6 z-50 flex items-center gap-3 glass rounded-2xl px-4 py-3 shadow-2xl shadow-black/60" style={{borderColor:'var(--border)'}}>
           <div className="text-xs font-mono mr-1" style={{color:'var(--sub)'}}>{currentNoteDisplay}</div>
@@ -2042,3 +2094,4 @@ function App() {
 }
 
 export default App
+

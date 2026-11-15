@@ -10,6 +10,7 @@
     "preview": "vite preview",
     "test:practice": "node tools/practiceGateTest.mjs",
     "test:pace": "node tools/paceTest.mjs",
+    "test:keyboard": "node tools/keyboardFitTest.mjs",
     "tauri": "tauri",
     "tauri:mic": "tauri build --debug --bundles app && codesign --force --sign - --entitlements src-tauri/Entitlements.plist src-tauri/target/debug/bundle/macos/Pianly.app && open src-tauri/target/debug/bundle/macos/Pianly.app"
   },
@@ -41,3 +42,4 @@
     "vite": "^8.1.0"
   }
 }
+

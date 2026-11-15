@@ -11,8 +11,8 @@ const ENHARMONIC = {
 
 export function notesMatch(detected, target, anyOctave = false) {
   if (!detected || !target) return false
-  const dMatch = detected.match(/^([A-G][#b]?)(\d+)$/)
-  const tMatch = target.match(/^([A-G][#b]?)(\d+)$/)
+  const dMatch = detected.match(/^([A-G][#b]?)(-?\d+)$/)
+  const tMatch = target.match(/^([A-G][#b]?)(-?\d+)$/)
   if (!dMatch || !tMatch) return false
 
   const nameMatch = dMatch[1] === tMatch[1] || ENHARMONIC[dMatch[1]] === tMatch[1]
@@ -116,3 +116,4 @@ export function onDevicesChanged(callback) {
 
   return () => clearInterval(pollInterval)
 }
+

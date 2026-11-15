@@ -18,9 +18,11 @@ jobs:
       - run: npm ci
       - run: npm run test:practice
       - run: npm run test:pace
+      - run: npm run test:keyboard
       - run: npm run tauri -- build --bundles nsis
       - uses: actions/upload-artifact@v4
         with:
           name: Pianly-LUMI-Windows
           path: src-tauri/target/release/bundle/nsis/*.exe
           if-no-files-found: error
+
