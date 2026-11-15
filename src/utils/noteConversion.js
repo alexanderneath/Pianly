@@ -7,6 +7,13 @@ const NOTE_NAMES = ['C', 'Db', 'D', 'Eb', 'E', 'F', 'Gb', 'G', 'Ab', 'A', 'Bb', 
 
 const BASE_SEMITONES = { C: 0, D: 2, E: 4, F: 5, G: 7, A: 9, B: 11 }
 
+// Internal Pianly names use C3 for MIDI 60. Display scientific pitch notation
+// (middle C = C4) without changing the MIDI numbers used by parsers and input.
+export function displayNoteName(name) {
+  const match = typeof name === 'string' && name.match(/^([A-G][#b]?)(-?\d+)$/)
+  return match ? match[1] + (Number(match[2]) + 1) : name
+}
+
 /** Convert MIDI number to note name string, e.g. 60 → "C3" */
 export function midiToNoteName(midi) {
   return NOTE_NAMES[((midi % 12) + 12) % 12] + (Math.floor(midi / 12) - 2)
@@ -39,3 +46,4 @@ export function getInterval(prevNotes, curNotes) {
   if (diff > 12) return `${INTERVAL_NAMES[diff % 12]} +${Math.floor(diff / 12)}oct`
   return INTERVAL_NAMES[diff] ?? `${diff} semitones`
 }
+

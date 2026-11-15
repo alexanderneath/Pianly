@@ -1,7 +1,6 @@
 import assert from 'node:assert/strict'
 import { LumiCueController } from '../src/practice/lumiCueController.js'
 import { StepGate } from '../src/practice/stepGate.js'
-import { fitTimelineToRange } from '../src/practice/keyboardFit.js'
 import { midiToNoteName, noteNameToMidi } from '../src/utils/noteConversion.js'
 import { keyboardSetupKey, loadKeyboardRange, saveKeyboardRange, needsKeyboardCalibration } from '../src/practice/keyboardSetup.js'
 
@@ -20,16 +19,17 @@ const asNotes = (...pitches) => pitches.map(midiToNoteName)
 let passed = 0
 async function test(name, run) { await run(); passed++; console.log('ok - ' + name) }
 
-await test('Maple Rag cue 3 re-lights after releasing the previous Ab octave chord', async () => {
+await test('a genuinely repeated Ab cue re-lights after releasing the previous chord', async () => {
   const clock = fakeClock()
   const lights = new Set()
   const controller = new LumiCueController(async (notes) => {
     lights.clear(); notes.forEach((note) => lights.add(note)); return 2
   }, undefined, clock)
   const gate = new StepGate(exactMatch)
-  const source = [[39, 51], [44, 56], [68], [51, 56, 60, 63, 75], [21, 108]]
+  // Physical repeated-note sequence. Maple's written higher Ab must no longer
+  // be folded here; its real pitch/position is covered by pitchPreservationTest.
+  const timeline = [[63, 75], [68, 80], [68], [75, 80, 84, 87, 99]]
     .map((notes, index) => ({ notes: asNotes(...notes), timeSec: index * 0.3 }))
-  const timeline = fitTimelineToRange(source, { low: 60, high: 107 }).timeline
   const pending = () => gate.remaining(timeline[index].notes).map(noteNameToMidi)
   let index = 0
   await controller.setNotes(pending())
@@ -160,7 +160,7 @@ await test('damaged or invalid saved ranges require calibration', () => {
   assert.equal(loadKeyboardRange(storage, key), null)
 })
 
-await test('fit mode cannot start practice or Listen without a confirmed valid range', () => {
+await test('fit mode requires a confirmed valid range before practice', () => {
   const options = { inputMode: 'midi', fitKeyboard: true, range: null }
   assert.equal(needsKeyboardCalibration(options), true)
   assert.equal(needsKeyboardCalibration({ ...options, range: { low: 60, high: 107 } }), false)

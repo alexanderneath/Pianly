@@ -20,6 +20,7 @@ jobs:
       - run: npm run test:pace
       - run: npm run test:keyboard
       - run: npm run test:lumi
+      - run: npm run test:pitch
       - run: npm run tauri -- build --bundles nsis
       - uses: actions/upload-artifact@v4
         with:

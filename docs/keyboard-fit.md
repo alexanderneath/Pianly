@@ -1,44 +1,55 @@
 # Fit to my keyboards
 
-Sheet Practice can adapt score octaves to the continuous MIDI range checked by
-the player. Enable **Fit to my keyboards**, check the lowest and highest physical
-keys, then keep the hardware octave setting fixed throughout the piece.
+Sheet Practice maps physical cue keys into the range checked by the player.
+**The music retains its written pitches.** Practice audio, hints, Listen,
+Target and interval labels use the original score notes. Lights and recognition
+use mapped physical keys. The previous implementation sounded those cue pitches,
+raising the bass and collapsing musical registers.
 
-The option defaults on and remembers the user's choice. The confirmed range is
-saved for the selected input and ROLI port configuration, so it survives changing
-songs and reopening the app. A changed input or port configuration requires a
-new check. Recheck manually after moving hardware octave controls or joining/
-separating keyboards: MIDI port names do not always expose those changes.
-Practice and Listen require confirmation before using fit mode;
-they never silently fall back to unreachable original notes.
+Enable **Fit to my keyboards**, check the lowest and highest physical keys,
+then keep the hardware octave setting fixed. The confirmed range is saved for
+the selected input and ROLI port configuration across songs and app restarts.
+Changing that configuration requires another check. Recheck manually after
+moving hardware octave controls or joining/separating keyboards: MIDI port names
+do not always expose those changes. Fitted practice requires a valid range.
+Listen needs no keyboard calibration and always plays the original score.
 
-When one common octave shift fits the complete piece, the app uses it to preserve
-all intervals. Otherwise it fits each step by octaves, preserving bass-to-melody
-order and separate chord keys where possible. If a chord is too wide, voicing
-can change; octave doubles share a key only when there are not enough separate
-keys of that pitch class. These changes are disclosed in the practice screen.
+The mapper chooses a consistent octave offset for the whole piece. If the whole
+score cannot fit, it maximises the number of notes covered. Each chord preserves
+its complete intervals when it fits by a common octave shift. Only chords that
+cannot fit this way need individual key positions adjusted. The screen explains
+when passages change position or wide chords use different spacing. A small
+keyboard cannot reproduce the original physical fingering of a chord wider than
+its span.
 
-This is an adapted learning arrangement. The original MusicXML and printed sheet
-are unchanged. **Target** shows the keys to play, with **Written** notes below
-when adapted. Key lights, exact MIDI recognition, hints and Listen playback use
-the same adapted targets. Playing a MIDI key sounds that physical key's pitch.
-Any-octave recognition is disabled while fitting is active.
+Every cue key retains its exact written pitch mapping. If several written
+octaves must share one physical key, pressing it sounds all original pitches.
+The interface discloses this; no pitches are discarded. **Target** shows written
+notes and **Lit keys** shows mapped positions. **Playing** shows the pitches
+sounded on the last presses, including keys held across a step change. This
+screen uses scientific octave numbering (MIDI 60 = C4); internal legacy Pianly
+names remain unchanged for parser/input compatibility. Free play outside
+practice continues to sound the keyboard's actual MIDI pitches.
 
-Only targets still needing a fresh press remain cued. A physical key release
-reasserts the latest pending cues after 30 ms, since the keyboard may clear its
-own LED after the next step has already reused that key. Stopping, pausing or
-finishing clears the lights and cancels pending refreshes.
+Only keys still needing a press remain cued. Releasing a key reasserts pending
+cues after 30 ms, since the hardware can clear a new cue for a reused key.
+Stop, pause and completion cancel pending refreshes.
 
-With a confirmed range, fitting may be switched during practice without losing the current position.
-Partial chord progress and early presses are cleared when switching. During
-Listen playback the option is locked until playback stops, so scheduled audio
-and the displayed arrangement stay consistent.
+With a confirmed range, fitting can be switched during practice without losing
+position; partial chord progress and early presses reset. The option is locked
+during Listen playback to keep the display stable.
 
-`npm run test:keyboard` checks the complete Fur Elise fixture, other score
-excerpts, octave chords, repeated notes, exact recognition, timing preservation,
-invalid ranges, and the MIDI pitch limits. Physical MIDI lights and sound still
-require an installed-app check on the user's devices.
+## Verification
 
-`npm run test:lumi` reproduces the Maple Leaf Rag opening release sequence and
-checks repeated-key cue recovery, partial chords, stale commands, pause/stop,
-output error recovery, saved ranges and the calibration requirement.
+- `npm run test:keyboard`: in-range cues, exact recognition, timing, octave
+  chords, repeated notes and MIDI limits.
+- `npm run test:lumi`: repeated-key release recovery, partial chords, stale
+  commands, pause/stop, output recovery, saved ranges and calibration.
+- `npm run test:pitch`: independent expected MIDI pitches from the complete
+  Fur Elise Easy and Maple Leaf Rag source MusicXML across four physical ranges.
+  Checks original pitches for every practice cue and Listen/hints, Maple's
+  opening register separation, early/repeated keys, combined octave keys and
+  scientific display labels. Fixtures retain original measure order; repeat
+  expansion itself is not part of this test.
+
+Physical lights and speaker output still require an installed-app check.

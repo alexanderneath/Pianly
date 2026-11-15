@@ -6,13 +6,13 @@ import { VerovioToolkit } from 'verovio/esm'
 import * as Tone from 'tone'
 import { SplendidGrandPiano } from 'smplr'
 import { DEMO_PIECES, loadDemoScore } from '../data/demoScores'
-import { midiToNoteName, noteNameToMidi, getInterval } from '../utils/noteConversion'
+import { midiToNoteName, noteNameToMidi, displayNoteName, getInterval } from '../utils/noteConversion'
 import { getSavedFolder, pickFolder } from '../lib/scoreFolder'
 import { isMobile } from '../lib/platform'
 import { enableMidi, listenToDevice, notesMatch, onDevicesChanged } from '../input/midiInput'
 import { startBasicPitchDetection, loadBasicPitchModel, isBasicPitchReady } from '../input/pitchDetector'
 import { StepGate } from '../practice/stepGate'
-import { fitTimelineToRange } from '../practice/keyboardFit'
+import { fitTimelineToRange, scoreNotes, notesForKey } from '../practice/keyboardFit'
 import { LumiCueController } from '../practice/lumiCueController'
 import { keyboardSetupKey, loadKeyboardRange, saveKeyboardRange, needsKeyboardCalibration } from '../practice/keyboardSetup'
 import { parseNoteTimelineOSMD } from '../parsers/osmdParser'
@@ -182,6 +182,8 @@ function App() {
   const anyOctaveRef = useRef(false)
   const modeRef = useRef('idle')
   const heldNotesRef = useRef(new Set())
+  const heldSoundingNotesRef = useRef(new Map())
+  const keyboardOffsetRef = useRef(0)
   // Which notes of the current step have been played, and notes played early for
   // the next one (see src/practice/stepGate.js). Shared by MIDI and the mic.
   const stepGateRef = useRef(null)
@@ -198,6 +200,7 @@ function App() {
   useEffect(() => { musicXmlRef.current = musicXml }, [musicXml])
   useEffect(() => { currentNoteIndexRef.current = currentNoteIndex }, [currentNoteIndex])
   useEffect(() => { noteTimelineRef.current = playableTimeline }, [playableTimeline])
+  useEffect(() => { keyboardOffsetRef.current = fitActive ? keyboardFit.octaveShift : 0 }, [fitActive, keyboardFit.octaveShift])
   useEffect(() => { completedRef.current = completed }, [completed])
   useEffect(() => { pausedRef.current = paused }, [paused])
   useEffect(() => { anyOctaveRef.current = matchAnyOctave }, [matchAnyOctave])
@@ -620,7 +623,7 @@ function App() {
     if (!piano || !target) return
     Tone.start().then(() => {
       const time = Tone.getContext().rawContext.currentTime
-      for (const noteName of target.notes) {
+      for (const noteName of scoreNotes(target)) {
         const midi = noteNameToMidi(noteName)
         if (midi !== null) piano.start({ note: midi, time, duration: 1.5 })
       }
@@ -656,18 +659,27 @@ function App() {
     stepWaitRef.current = null
     stepGateRef.current.reset()
     micHeardRef.current = new Set()
+    heldNotesRef.current.clear()
+    heldSoundingNotesRef.current.clear()
   }
 
   const playMidiKey = useCallback((name) => {
-    const pitch = noteNameToMidi(name)
-    if (pitch === null) return
+    const idx = currentNoteIndexRef.current
+    const notes = modeRef.current === 'practice'
+      ? notesForKey(name, noteTimelineRef.current[idx], noteTimelineRef.current[idx + 1], {
+        waiting: !!stepWaitRef.current, octaveShift: keyboardOffsetRef.current,
+      }) : [name]
     const play = () => {
       if (modeRef.current !== 'idle' &&
           (modeRef.current !== 'practice' || completedRef.current || pausedRef.current)) return
-      toneSamplerRef.current?.start({ note: pitch, time: Tone.now(), duration: 0.45 })
+      const time = Tone.now()
+      for (const pitch of notes.map(noteNameToMidi)) {
+        if (pitch !== null) toneSamplerRef.current?.start({ note: pitch, time, duration: 0.45 })
+      }
     }
     if (Tone.getContext().state === 'running') play()
     else Tone.start().then(play).catch((error) => console.error('[Audio] MIDI playback:', error))
+    return notes
   }, [])
 
   // A key press (MIDI note-on, or a note newly heard by the mic).
@@ -715,7 +727,9 @@ function App() {
 
   const handleNoteOff = useCallback((note) => {
     heldNotesRef.current.delete(note)
-    setDetectedNote(heldNotesRef.current.size ? [...heldNotesRef.current].join(' + ') : null)
+    heldSoundingNotesRef.current.delete(note)
+    const sounding = [...new Set([...heldSoundingNotesRef.current.values()].flat())]
+    setDetectedNote(sounding.length ? sounding.join(' + ') : null)
     lumiController.current.keyReleased()
   }, [])
 
@@ -765,7 +779,7 @@ function App() {
       selectedDeviceId,
       (note) => {
         if (cancelled) return
-        playMidiKey(note)
+        const sounding = playMidiKey(note)
         if (modeRef.current === 'idle') {
           const pitch = noteNameToMidi(note)
           if (pitch !== null) {
@@ -779,7 +793,8 @@ function App() {
         }
         if (modeRef.current !== 'practice' || completedRef.current || pausedRef.current) return
         heldNotesRef.current.add(note)
-        setDetectedNote([...heldNotesRef.current].join(' + '))
+        heldSoundingNotesRef.current.set(note, sounding)
+        setDetectedNote([...new Set([...heldSoundingNotesRef.current.values()].flat())].join(' + '))
         handlePress(note)
       },
       (note) => {
@@ -794,6 +809,7 @@ function App() {
       cancelled = true
       disconnect?.()
       heldNotesRef.current.clear()
+      heldSoundingNotesRef.current.clear()
     }
   }, [needsMidi, selectedDeviceId, handlePress, handleNoteOff, playMidiKey])
 
@@ -1068,7 +1084,7 @@ function App() {
       return
     }
 
-    if (noteTimeline.length === 0 || !ensureKeyboardReady()) return
+    if (noteTimeline.length === 0) return
 
     const piano = toneSamplerRef.current
     if (!piano) return
@@ -1090,9 +1106,9 @@ function App() {
     transport.bpm.value = 60
     transport.position = 0
 
-    // Demonstrate the same arrangement as the lit keys and practice targets.
+    // Always demonstrate the written pitches, independent of physical key mapping.
     const events = playableTimeline.flatMap((entry) =>
-      entry.notes.flatMap((name) => {
+      scoreNotes(entry).flatMap((name) => {
         const midi = noteNameToMidi(name)
         if (midi === null) return []
         return [[
@@ -1286,20 +1302,19 @@ function App() {
   // Derived display values
   // ---------------------------------------------------------------------------
   const currentEntry = playableTimeline[currentNoteIndex]
-  // Match the target, MIDI input and score parser (Pianly labels MIDI 60 as C3).
-  const rangeLabel = (pitch) => midiToNoteName(pitch) + ' (MIDI ' + pitch + ')'
+  const rangeLabel = (pitch) => displayNoteName(midiToNoteName(pitch)) + ' (MIDI ' + pitch + ')'
   const outsideRange = keyboardRange && currentEntry
     ? currentEntry.notes.map(noteNameToMidi).filter((pitch) =>
         pitch !== null && (pitch < keyboardRange.low || pitch > keyboardRange.high))
     : []
-  const currentNoteDisplay = currentEntry ? currentEntry.notes.join(' + ') : '---'
+  const currentNoteDisplay = currentEntry ? scoreNotes(currentEntry).map(displayNoteName).join(' + ') : '---'
   const totalMeasures = noteTimeline.length > 0 ? noteTimeline[noteTimeline.length - 1].measure : 0
   const isMatch = mode === 'practice' && detectedNote && currentEntry &&
     currentEntry.notes.some((tn) =>
       [...heldNotesRef.current].some((held) => notesMatch(held, tn, matchAnyOctave))
     )
   const prevEntry = currentNoteIndex > 0 ? playableTimeline[currentNoteIndex - 1] : null
-  const intervalName = currentEntry && prevEntry ? getInterval(prevEntry.notes, currentEntry.notes) : null
+  const intervalName = currentEntry && prevEntry ? getInterval(scoreNotes(prevEntry), scoreNotes(currentEntry)) : null
 
   const selectedDevice = midiDevices.find((d) => d.id === selectedDeviceId)
 
@@ -1631,10 +1646,12 @@ function App() {
                     {fitActive && (
                       <p role="status">
                         {keyboardFit.adjustedNotes > 0
-                          ? 'Octaves adapted to your keys. Follow the lit keys and Target notes; Listen plays this adapted version. The sheet stays as written.'
+                          ? 'Follow the lit keys. Practice and Listen keep the original pitches; only the physical key positions are mapped.'
                           : 'This piece fits your checked range.'}
                         {' '}Keep the hardware octave setting fixed while playing.
-                        {keyboardFit.mergedNotes > 0 && ' Some octave doubles share one key in this arrangement.'}
+                        {keyboardFit.repositionedSteps > 0 && ' Some passages move to a different key position to stay within your range.'}
+                        {keyboardFit.reshapedChords > 0 && ' Some chords are too wide for these keys, so their key spacing is adjusted; the sound stays as written.'}
+                        {keyboardFit.mergedNotes > 0 && ' Some keys play more than one written octave.'}
                       </p>
                     )}
                     {mode === 'idle' && !rangeSetup && (
@@ -1738,15 +1755,15 @@ function App() {
                           <div className="text-lg font-bold font-mono leading-tight" style={{color:'var(--ink)'}}>{currentNoteDisplay}</div>
                           {currentEntry.octaveAdjusted && (
                             <div className="text-xs mt-1" style={{color:'var(--sub)'}}>
-                              Written: {currentEntry.writtenNotes.join(' + ')}
-                              {currentEntry.mergedNotes > 0 && ' (octave doubles combined)'}
+                              Lit keys: {currentEntry.notes.map(displayNoteName).join(' + ')}
+                              {currentEntry.mergedNotes > 0 && ' (one key plays multiple octaves)'}
                             </div>
                           )}
                         </div>
                         <div className="text-center">
                           <div className="text-[10px] uppercase tracking-wider" style={{color:'var(--sub)'}}>Playing</div>
                           <div className="text-lg font-bold font-mono leading-tight" style={{color: !detectedNote ? 'var(--panel)' : isMatch ? 'var(--ink)' : '#e07878'}}>
-                            {detectedNote ?? '---'}
+                            {detectedNote ? detectedNote.split(' + ').map(displayNoteName).join(' + ') : '---'}
                           </div>
                         </div>
                         <div className="w-3 h-3 rounded-full shrink-0 transition-colors" style={{background: !detectedNote ? 'var(--panel)' : isMatch ? 'var(--accent)' : '#e07878'}} />

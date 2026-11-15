@@ -12,6 +12,7 @@
     "test:pace": "node tools/paceTest.mjs",
     "test:keyboard": "node tools/keyboardFitTest.mjs",
     "test:lumi": "node tools/lumiCueTest.mjs",
+    "test:pitch": "node tools/pitchPreservationTest.mjs",
     "tauri": "tauri",
     "tauri:mic": "tauri build --debug --bundles app && codesign --force --sign - --entitlements src-tauri/Entitlements.plist src-tauri/target/debug/bundle/macos/Pianly.app && open src-tauri/target/debug/bundle/macos/Pianly.app"
   },

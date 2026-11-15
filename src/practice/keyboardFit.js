@@ -56,13 +56,37 @@ function fitChord(pitches, range) {
   return pitches.map((pitch) => mapped.get(pitch))
 }
 
+// Prefer one keyboard offset for the whole piece, even when occasional notes
+// exceed its range. Choosing independently from the original pitch at every
+// step collapses low bass and higher melody onto the same physical keys.
+function chooseKeyboardOffset(parsed, range) {
+  let best = null
+  for (let octaves = -10; octaves <= 10; octaves++) {
+    let outside = 0, distance = 0
+    for (const pitches of parsed) {
+      for (const pitch of pitches) {
+        const shifted = pitch + octaves * 12
+        const excess = Math.max(range.low - shifted, shifted - range.high, 0)
+        if (excess) outside++
+        distance += excess
+      }
+    }
+    const cost = [outside, distance, Math.abs(octaves)]
+    if (!best || cost.some((v, i) => v < best.cost[i] && cost.slice(0, i).every((x, j) => x === best.cost[j]))) {
+      best = { octaves, cost }
+    }
+  }
+  return best.octaves
+}
+
 /**
- * Make an octave-adapted practice arrangement. The original score and timing are
- * retained; .notes is the single set used for cues, scoring, hints and listening.
- * A common octave shift preserves the entire arrangement whenever it fits.
+ * Map physical key positions without transposing the music. .notes is used
+ * only for lights/recognition; writtenNotes and keyMap retain the exact score
+ * pitches for sound. Prefer a consistent whole-piece offset and intact chord
+ * intervals. Only chords too wide for the keys need individual repositioning.
  */
 export function fitTimelineToRange(timeline, range) {
-  const unchanged = { timeline, adjustedNotes: 0, mergedNotes: 0, octaveShift: 0, error: null }
+  const unchanged = { timeline, adjustedNotes: 0, mergedNotes: 0, octaveShift: 0, repositionedSteps: 0, reshapedChords: 0, error: null }
   if (!range) return unchanged
   if (!isValidKeyboardRange(range)) {
     return { ...unchanged, error: 'Check a continuous range of at least 12 keys to fit every note name.' }
@@ -79,14 +103,23 @@ export function fitTimelineToRange(timeline, range) {
   for (const pitch of allPitches) { low = Math.min(low, pitch); high = Math.max(high, pitch) }
   const minOctave = Math.ceil((range.low - low) / 12)
   const maxOctave = Math.floor((range.high - high) / 12)
-  const octaveShift = minOctave <= maxOctave ? Math.min(maxOctave, Math.max(minOctave, 0)) : null
+  const octaveShift = minOctave <= maxOctave
+    ? Math.min(maxOctave, Math.max(minOctave, 0)) : chooseKeyboardOffset(parsed, range)
   let adjustedNotes = 0
   let mergedNotes = 0
+  let repositionedSteps = 0
+  let reshapedChords = 0
   const fitted = timeline.map((entry, index) => {
     const pitches = [...new Set(parsed[index])].sort((a, b) => a - b)
-    const mapped = octaveShift === null
-      ? fitChord(pitches, range)
-      : pitches.map((pitch) => pitch + octaveShift * 12)
+    if (!pitches.length) return entry
+    const minShift = Math.ceil((range.low - pitches[0]) / 12)
+    const maxShift = Math.floor((range.high - pitches.at(-1)) / 12)
+    const stepShift = minShift <= maxShift ? Math.min(maxShift, Math.max(minShift, octaveShift)) : null
+    const mapped = stepShift === null
+      ? fitChord(pitches.map((pitch) => pitch + octaveShift * 12), range)
+      : pitches.map((pitch) => pitch + stepShift * 12)
+    if (stepShift !== octaveShift) repositionedSteps++
+    if (stepShift === null) reshapedChords++
     const pitchMap = new Map(pitches.map((pitch, i) => [pitch, mapped[i]]))
     const shifted = parsed[index].filter((pitch) => pitchMap.get(pitch) !== pitch).length
     const merged = pitches.length - new Set(mapped).size
@@ -101,7 +134,30 @@ export function fitTimelineToRange(timeline, range) {
       seen.add(target)
       notes.push(target === parsed[index][i] ? entry.notes[i] : midiToNoteName(target))
     }
-    return { ...entry, notes, writtenNotes: entry.notes, octaveAdjusted: true, mergedNotes: merged }
+    const keyMap = notes.map((key) => ({
+      key,
+      written: entry.notes.filter((_, i) => pitchMap.get(parsed[index][i]) === noteNameToMidi(key)),
+    }))
+    return { ...entry, notes, writtenNotes: entry.notes, keyMap, octaveAdjusted: true, mergedNotes: merged }
   })
-  return { timeline: fitted, adjustedNotes, mergedNotes, octaveShift, error: null }
+  return { timeline: fitted, adjustedNotes, mergedNotes, octaveShift, repositionedSteps, reshapedChords, error: null }
+}
+
+/** Musical pitches never come from the physical cue keys. */
+export function scoreNotes(entry) { return entry?.writtenNotes ?? entry?.notes ?? [] }
+
+/** Resolve a physical key before advancing the practice gate. Early notes use
+ * the next step's mapping; a wrong key uses the whole-piece keyboard offset. */
+export function notesForKey(key, current, next, { waiting = false, octaveShift = 0 } = {}) {
+  const pitch = noteNameToMidi(key)
+  const match = (entry) => {
+    const item = entry?.keyMap?.find((item) => noteNameToMidi(item.key) === pitch)
+    if (item) return item.written
+    const note = entry?.notes.find((name) => noteNameToMidi(name) === pitch)
+    return note ? [note] : null
+  }
+  const matched = waiting ? match(next) : match(current) ?? match(next)
+  if (matched) return matched
+  const unshifted = pitch - octaveShift * 12
+  return [Number.isInteger(pitch) && unshifted >= 0 && unshifted <= 127 ? midiToNoteName(unshifted) : key]
 }

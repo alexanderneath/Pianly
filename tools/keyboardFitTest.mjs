@@ -47,12 +47,12 @@ test('one common octave shift preserves all intervals when possible', () => {
 test('the blocked A chord uses two separate keys, with bass below melody', () => {
   const source = [moment([57, 69]), moment([33, 77], 1)] // no common shift fits
   const fitted = fitTimelineToRange(source, { low: 60, high: 107 })
-  assert.equal(fitted.octaveShift, null)
-  assert.deepEqual(pitches(fitted.timeline[0]), [69, 81])
+  assert.equal(fitted.octaveShift, 2)
+  assert.deepEqual(pitches(fitted.timeline[0]), [81, 93])
   const gate = new StepGate((a, b) => noteNameToMidi(a) === noteNameToMidi(b))
   const target = fitted.timeline[0].notes
-  assert.equal(gate.press(midiToNoteName(69), target, null, false, 0), 'building')
-  assert.equal(gate.press(midiToNoteName(81), target, null, false, 1), 'complete')
+  assert.equal(gate.press(midiToNoteName(81), target, null, false, 0), 'building')
+  assert.equal(gate.press(midiToNoteName(93), target, null, false, 1), 'complete')
 })
 
 test('octave doubles only combine when there are not enough keys', () => {
