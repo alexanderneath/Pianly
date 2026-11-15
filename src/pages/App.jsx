@@ -114,7 +114,10 @@ function App() {
   const [showMicPrompt, setShowMicPrompt] = useState(false)
 
   // Input state
-  const [lumiCues, setLumiCues] = useState(false)
+  const [lumiCues, setLumiCues] = useState(() => {
+    try { return localStorage.getItem('nf-lumi-cues') !== 'false' }
+    catch { return true }
+  })
   const [keyboardRange, setKeyboardRange] = useState(null)
   const [rangeSetup, setRangeSetup] = useState(null)
   const [lumiStatus, setLumiStatus] = useState('')
@@ -178,6 +181,9 @@ function App() {
   useEffect(() => { autoscrollRef.current = autoscroll }, [autoscroll])
   useEffect(() => { playbackSpeedRef.current = playbackSpeed }, [playbackSpeed])
   useEffect(() => { localStorage.setItem('nf-input', inputMode) }, [inputMode])
+  useEffect(() => {
+    try { localStorage.setItem('nf-lumi-cues', String(lumiCues)) } catch {}
+  }, [lumiCues])
   useEffect(() => { localStorage.setItem('nf-default-bpm', String(defaultBpm)) }, [defaultBpm])
   useEffect(() => { setBpmInput(bpm != null ? String(bpm) : '') }, [bpm])
   useEffect(() => { setDefaultBpmInput(String(defaultBpm)) }, [defaultBpm])
@@ -1555,7 +1561,8 @@ function App() {
                   }} />
                   {' '}LUMI key cues (experimental)
                 </label>
-                {lumiCues && lumiStatus && <p role="status">{lumiStatus}</p>}
+                {!lumiCues && <p>Key cues are off. Tick the box to light the next notes.</p>}
+                {lumiCues && mode === 'practice' && !paused && !completed && lumiStatus && <p role="status">{lumiStatus}</p>}
                 {inputMode === 'midi' && selectedDeviceId && (
                   <div className="mt-2">
                     {keyboardRange && <p>Keyboard range: {rangeLabel(keyboardRange.low)} to {rangeLabel(keyboardRange.high)}</p>}
