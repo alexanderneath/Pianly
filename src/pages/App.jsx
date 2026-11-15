@@ -6,7 +6,7 @@ import { VerovioToolkit } from 'verovio/esm'
 import * as Tone from 'tone'
 import { SplendidGrandPiano } from 'smplr'
 import { DEMO_PIECES, loadDemoScore } from '../data/demoScores'
-import { noteNameToMidi, getInterval } from '../utils/noteConversion'
+import { midiToNoteName, noteNameToMidi, getInterval } from '../utils/noteConversion'
 import { getSavedFolder, pickFolder } from '../lib/scoreFolder'
 import { isMobile } from '../lib/platform'
 import { enableMidi, listenToDevice, notesMatch, onDevicesChanged } from '../input/midiInput'
@@ -1228,10 +1228,8 @@ function App() {
   // Derived display values
   // ---------------------------------------------------------------------------
   const currentEntry = noteTimeline[currentNoteIndex]
-  const rangeLabel = (pitch) => {
-    const names = ['C', 'C♯', 'D', 'E♭', 'E', 'F', 'F♯', 'G', 'A♭', 'A', 'B♭', 'B']
-    return names[pitch % 12] + (Math.floor(pitch / 12) - 1) + ' (MIDI ' + pitch + ')'
-  }
+  // Match the target, MIDI input and score parser (Pianly labels MIDI 60 as C3).
+  const rangeLabel = (pitch) => midiToNoteName(pitch) + ' (MIDI ' + pitch + ')'
   const outsideRange = keyboardRange && currentEntry
     ? currentEntry.notes.map(noteNameToMidi).filter((pitch) =>
         pitch !== null && (pitch < keyboardRange.low || pitch > keyboardRange.high))
