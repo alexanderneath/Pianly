@@ -634,6 +634,13 @@ function App() {
     micHeardRef.current = new Set()
   }
 
+  const playPracticeKey = useCallback((name) => {
+    if (modeRef.current !== 'practice' || completedRef.current || pausedRef.current) return
+    const pitch = noteNameToMidi(name)
+    if (pitch === null) return
+    toneSamplerRef.current?.start({ note: pitch, time: Tone.now(), duration: 0.45 })
+  }, [])
+
   // A key press (MIDI note-on, or a note newly heard by the mic).
   const handlePress = useCallback((name) => {
     if (completedRef.current || pausedRef.current) return
@@ -719,6 +726,7 @@ function App() {
       const stop = await listenToDevice(
         selectedDeviceId,
         (note) => {
+          playPracticeKey(note)
           heldNotesRef.current.add(note)
           setDetectedNote([...heldNotesRef.current].join(' + '))
           handlePress(note)
@@ -733,7 +741,7 @@ function App() {
     })()
 
     return () => { cancelled = true }
-  }, [selectedDeviceId, mode, inputMode, handlePress, handleNoteOff])
+  }, [selectedDeviceId, mode, inputMode, handlePress, handleNoteOff, playPracticeKey])
 
   // Cleanup on unmount
   useEffect(() => {
@@ -1055,6 +1063,9 @@ function App() {
   // ---------------------------------------------------------------------------
   async function handleStartPractice() {
     if (noteTimeline.length === 0) return
+    if (inputMode === 'midi') {
+      Tone.start().catch((error) => console.error('[Audio] Could not start practice audio:', error))
+    }
 
     setCurrentNoteIndex(0)
     setDetectedNote(null)
@@ -1079,6 +1090,7 @@ function App() {
       const stop = await listenToDevice(
         selectedDeviceId,
         (note) => {
+          playPracticeKey(note)
           heldNotesRef.current.add(note)
           setDetectedNote([...heldNotesRef.current].join(' + '))
           handlePress(note)
