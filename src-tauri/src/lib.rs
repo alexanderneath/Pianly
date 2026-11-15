@@ -10,7 +10,7 @@ use tauri::State;
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 #[derive(Default)]
 struct MidiState {
-    connection: Mutex<Option<MidiInputConnection<()>>>,
+    connection: Mutex<Vec<MidiInputConnection<()>>>,
     lumi: Mutex<LumiOutputs>,
 }
 
@@ -48,6 +48,15 @@ mod midi_impl {
 use midi_impl::*;
 
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
+const BOTH_LUMIS: usize = 65535;
+
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+fn is_lumi_port(name: &str) -> bool {
+    let name = name.to_lowercase();
+    name.contains("lumi") || name.contains("piano m")
+}
+
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
 #[tauri::command]
 fn get_midi_inputs() -> Vec<MidiDevice> {
     let midi_in = match MidiInput::new("pianly-list") {
@@ -59,7 +68,7 @@ fn get_midi_inputs() -> Vec<MidiDevice> {
     };
 
     let ports = midi_in.ports();
-    ports
+    let mut devices: Vec<MidiDevice> = ports
         .iter()
         .enumerate()
         .filter_map(|(i, port)| {
@@ -68,7 +77,11 @@ fn get_midi_inputs() -> Vec<MidiDevice> {
                 .ok()
                 .map(|name| MidiDevice { id: i, name })
         })
-        .collect()
+        .collect();
+    if devices.iter().filter(|device| is_lumi_port(&device.name)).count() > 1 {
+        devices.insert(0, MidiDevice { id: BOTH_LUMIS, name: "Both LUMI / Piano M keyboards".into() });
+    }
+    devices
 }
 
 #[cfg(any(target_os = "android", target_os = "ios"))]
@@ -84,54 +97,56 @@ fn connect_midi(
     app: tauri::AppHandle,
     state: State<'_, MidiState>,
 ) -> Result<String, String> {
-    // Close existing connection
-    {
-        let mut conn = state.connection.lock().unwrap();
-        if let Some(c) = conn.take() {
-            drop(c);
-        }
+    use std::collections::HashSet;
+    use std::sync::Arc;
+
+    let mut active = state.connection.lock().map_err(|error| error.to_string())?;
+    active.clear();
+    let midi_in = MidiInput::new("pianly-input").map_err(|error| error.to_string())?;
+    let ports = midi_in.ports();
+    let selected: Vec<_> = ports.iter().enumerate().filter_map(|(index, port)| {
+        let name = midi_in.port_name(port).unwrap_or_else(|_| "Unknown".into());
+        (index == device_id || (device_id == BOTH_LUMIS && is_lumi_port(&name)))
+            .then_some((index, port, name))
+    }).collect();
+    if selected.is_empty() {
+        return Err(format!("MIDI input {} is unavailable", device_id));
     }
 
-    let midi_in = MidiInput::new("pianly-input")
-        .map_err(|e| format!("Failed to create MIDI input: {}", e))?;
-
-    let ports = midi_in.ports();
-    let port = ports
-        .get(device_id)
-        .ok_or_else(|| format!("Device index {} not found", device_id))?;
-
-    let port_name = midi_in
-        .port_name(port)
-        .unwrap_or_else(|_| "Unknown".to_string());
-
-    let app_handle = app.clone();
-    let connection = midi_in
-        .connect(
-            port,
-            "pianly-read",
-            move |_timestamp, message, _| {
-                if message.len() >= 3 {
-                    let status = message[0] & 0xf0;
-                    if status == 0x90 && message[2] > 0 {
-                        // noteOn
-                        let note = midi_number_to_note(message[1]);
-                        let _ = app_handle.emit("midi-note", MidiNoteEvent { note });
-                    } else if status == 0x80 || (status == 0x90 && message[2] == 0) {
-                        // noteOff
-                        let note = midi_number_to_note(message[1]);
-                        let _ = app_handle.emit("midi-note-off", MidiNoteEvent { note });
-                    }
+    let held = Arc::new(Mutex::new(HashSet::new()));
+    let mut connections = Vec::new();
+    let mut names = Vec::new();
+    for (index, port, name) in selected {
+        let input = MidiInput::new("pianly-input").map_err(|error| error.to_string())?;
+        let app = app.clone();
+        let held = held.clone();
+        let connection = input.connect(port, "pianly-read", move |_, message, _| {
+            if message.len() < 3 {
+                return;
+            }
+            let status = message[0] & 0xf0;
+            if status != 0x80 && status != 0x90 {
+                return;
+            }
+            let pitch = message[1];
+            let key = (index, message[0] & 0x0f, pitch);
+            let Ok(mut held) = held.lock() else { return };
+            let note = midi_number_to_note(pitch);
+            if status == 0x90 && message[2] > 0 {
+                held.insert(key);
+                let _ = app.emit("midi-note", MidiNoteEvent { note });
+            } else {
+                held.remove(&key);
+                if !held.iter().any(|&(_, _, other)| other == pitch) {
+                    let _ = app.emit("midi-note-off", MidiNoteEvent { note });
                 }
-            },
-            (),
-        )
-        .map_err(|e| format!("Failed to connect to {}: {}", port_name, e))?;
-
-    let mut conn = state.connection.lock().unwrap();
-    *conn = Some(connection);
-
-    log::info!("[MIDI] Connected: {}", port_name);
-    Ok(port_name)
+            }
+        }, ()).map_err(|error| format!("Failed to connect to {}: {}", name, error))?;
+        connections.push(connection);
+        names.push(name);
+    }
+    *active = connections;
+    Ok(names.join(" + "))
 }
 
 #[cfg(any(target_os = "android", target_os = "ios"))]
@@ -147,10 +162,8 @@ fn connect_midi(
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 #[tauri::command]
 fn disconnect_midi(state: State<'_, MidiState>) {
-    let mut conn = state.connection.lock().unwrap();
-    if let Some(c) = conn.take() {
-        drop(c);
-        log::info!("[MIDI] Disconnected");
+    if let Ok(mut connections) = state.connection.lock() {
+        connections.clear();
     }
 }
 
@@ -201,8 +214,8 @@ fn set_lumi_cue(mut notes: Vec<u8>, state: State<'_, MidiState>) -> Result<usize
     if lumi.ports.is_empty() {
         let output = MidiOutput::new("Pianly LUMI").map_err(|e| e.to_string())?;
         for port in output.ports() {
-            let name = output.port_name(&port).unwrap_or_default().to_lowercase();
-            if !name.contains("lumi") && !name.contains("piano m") {
+            let name = output.port_name(&port).unwrap_or_default();
+            if !is_lumi_port(&name) {
                 continue;
             }
             let output = MidiOutput::new("Pianly LUMI").map_err(|e| e.to_string())?;
