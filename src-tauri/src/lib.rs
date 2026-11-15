@@ -1,5 +1,5 @@
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
-use midir::{MidiInput, MidiInputConnection};
+use midir::{MidiInput, MidiInputConnection, MidiOutput, MidiOutputConnection};
 use serde::Serialize;
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 use std::sync::Mutex;
@@ -11,6 +11,7 @@ use tauri::State;
 #[derive(Default)]
 struct MidiState {
     connection: Mutex<Option<MidiInputConnection<()>>>,
+    lumi: Mutex<LumiOutputs>,
 }
 
 #[cfg(any(target_os = "android", target_os = "ios"))]
@@ -157,6 +158,82 @@ fn disconnect_midi(state: State<'_, MidiState>) {
 #[tauri::command]
 fn disconnect_midi(_state: State<'_, MidiState>) {}
 
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+#[derive(Default)]
+struct LumiOutputs {
+    ports: Vec<MidiOutputConnection>,
+    notes: Vec<u8>,
+}
+
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+impl LumiOutputs {
+    fn clear(&mut self) {
+        for port in &mut self.ports {
+            for &note in &self.notes {
+                let _ = port.send(&[0x80, note, 0]);
+            }
+        }
+        self.notes.clear();
+    }
+}
+
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+impl Drop for LumiOutputs {
+    fn drop(&mut self) {
+        self.clear();
+    }
+}
+
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+#[tauri::command]
+fn set_lumi_cue(mut notes: Vec<u8>, state: State<'_, MidiState>) -> Result<usize, String> {
+    if notes.iter().any(|&note| note > 127) {
+        return Err("Invalid MIDI note".into());
+    }
+    notes.sort_unstable();
+    notes.dedup();
+    let mut lumi = state.lumi.lock().map_err(|e| e.to_string())?;
+    lumi.clear();
+    if notes.is_empty() {
+        return Ok(0);
+    }
+
+    if lumi.ports.is_empty() {
+        let output = MidiOutput::new("Pianly LUMI").map_err(|e| e.to_string())?;
+        for port in output.ports() {
+            let name = output.port_name(&port).unwrap_or_default().to_lowercase();
+            if !name.contains("lumi") && !name.contains("piano m") {
+                continue;
+            }
+            let output = MidiOutput::new("Pianly LUMI").map_err(|e| e.to_string())?;
+            if let Ok(connection) = output.connect(&port, "Pianly cue") {
+                lumi.ports.push(connection);
+            }
+        }
+    }
+    if lumi.ports.is_empty() {
+        return Err("No accessible LUMI or Piano M MIDI output. Close other MIDI apps and check the USB connection.".into());
+    }
+    lumi.notes = notes.clone();
+    for port in &mut lumi.ports {
+        for &note in &notes {
+            if let Err(error) = port.send(&[0x90, note, 90]) {
+                let message = error.to_string();
+                lumi.clear();
+                lumi.ports.clear();
+                return Err(message);
+            }
+        }
+    }
+    Ok(lumi.ports.len())
+}
+
+#[cfg(any(target_os = "android", target_os = "ios"))]
+#[tauri::command]
+fn set_lumi_cue(_notes: Vec<u8>) -> Result<usize, String> {
+    Err("LUMI MIDI output is available on desktop only".into())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -167,6 +244,7 @@ pub fn run() {
             get_midi_inputs,
             connect_midi,
             disconnect_midi,
+            set_lumi_cue,
         ])
         .setup(|app| {
             if cfg!(debug_assertions) {
