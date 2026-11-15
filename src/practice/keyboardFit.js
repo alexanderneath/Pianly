@@ -1,5 +1,10 @@
 import { midiToNoteName, noteNameToMidi } from '../utils/noteConversion.js'
 
+export function isValidKeyboardRange(range) {
+  return !!range && Number.isInteger(range.low) && Number.isInteger(range.high) &&
+    range.low >= 0 && range.high <= 127 && range.high - range.low >= 11
+}
+
 function candidates(pitch, range) {
   const first = pitch + 12 * Math.ceil((range.low - pitch) / 12)
   const result = []
@@ -59,8 +64,7 @@ function fitChord(pitches, range) {
 export function fitTimelineToRange(timeline, range) {
   const unchanged = { timeline, adjustedNotes: 0, mergedNotes: 0, octaveShift: 0, error: null }
   if (!range) return unchanged
-  if (!Number.isInteger(range.low) || !Number.isInteger(range.high) ||
-      range.low < 0 || range.high > 127 || range.high - range.low < 11) {
+  if (!isValidKeyboardRange(range)) {
     return { ...unchanged, error: 'Check a continuous range of at least 12 keys to fit every note name.' }
   }
   const parsed = timeline.map((entry) => entry.notes.map((name) =>

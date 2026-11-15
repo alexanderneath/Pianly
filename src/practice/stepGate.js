@@ -80,6 +80,11 @@ export class StepGate {
     return { complete, at: complete ? this.curDoneAt ?? null : null }
   }
 
+  /** Only notes still needing a fresh press should remain illuminated. */
+  remaining(target) {
+    return target.filter((note) => !this.cur.has(note))
+  }
+
   _early(name, next, anyOctave, now) {
     if (!next || next.length === 0) return false
     const hit = next.filter((tn) => this.match(name, tn, anyOctave))
@@ -89,3 +94,4 @@ export class StepGate {
     return true
   }
 }
+

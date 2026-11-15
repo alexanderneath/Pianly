@@ -13,6 +13,8 @@ import { enableMidi, listenToDevice, notesMatch, onDevicesChanged } from '../inp
 import { startBasicPitchDetection, loadBasicPitchModel, isBasicPitchReady } from '../input/pitchDetector'
 import { StepGate } from '../practice/stepGate'
 import { fitTimelineToRange } from '../practice/keyboardFit'
+import { LumiCueController } from '../practice/lumiCueController'
+import { keyboardSetupKey, loadKeyboardRange, saveKeyboardRange, needsKeyboardCalibration } from '../practice/keyboardSetup'
 import { parseNoteTimelineOSMD } from '../parsers/osmdParser'
 import { tickToSec } from '../parsers/parseTimeline'
 import Background from '../Background'
@@ -119,14 +121,22 @@ function App() {
     try { return localStorage.getItem('nf-lumi-cues') !== 'false' }
     catch { return true }
   })
-  const [keyboardRange, setKeyboardRange] = useState(null)
+  const [rangeCalibration, setRangeCalibration] = useState(null)
   const [rangeSetup, setRangeSetup] = useState(null)
   const [fitKeyboard, setFitKeyboard] = useState(() => {
     try { return localStorage.getItem('nf-fit-keyboard') !== 'false' }
     catch { return true }
   })
   const [lumiStatus, setLumiStatus] = useState('')
-  const lumiQueue = useRef(Promise.resolve())
+  const [cueRevision, setCueRevision] = useState(0)
+  const lumiController = useRef(null)
+  if (!lumiController.current) {
+    lumiController.current = new LumiCueController(
+      (notes) => invoke('set_lumi_cue', { notes }),
+      (notes, count, error) => setLumiStatus(error ? String(error) :
+        notes.length ? 'Sent cue to ' + count + ' MIDI output(s)' : ''),
+    )
+  }
   const [midiSupported, setMidiSupported] = useState(null)
   const [midiDevices, setMidiDevices] = useState([])
   const [selectedDeviceId, setSelectedDeviceId] = useState(null)
@@ -138,6 +148,8 @@ function App() {
   const [showDebug, setShowDebug] = useState(false)
   const [debugLog, setDebugLog] = useState([])
 
+  const setupKey = keyboardSetupKey(midiDevices, selectedDeviceId)
+  const keyboardRange = rangeCalibration?.setupKey === setupKey ? rangeCalibration : null
   const keyboardFit = useMemo(() => fitTimelineToRange(noteTimeline,
     fitKeyboard && inputMode === 'midi' ? keyboardRange : null),
   [noteTimeline, fitKeyboard, inputMode, keyboardRange])
@@ -308,28 +320,18 @@ function App() {
   }, [inputMode])
 
   useEffect(() => {
-    if (!lumiCues || isMobile || mode !== 'practice' || paused || completed) return
-    const notes = (playableTimeline[currentNoteIndex]?.notes ?? [])
+    if (isMobile) return
+    const controller = lumiController.current
+    if (!lumiCues || mode !== 'practice' || paused || completed) {
+      controller.clear()
+      return
+    }
+    const notes = stepGateRef.current.remaining(playableTimeline[currentNoteIndex]?.notes ?? [])
       .map(noteNameToMidi)
       .filter((note) => Number.isInteger(note) && note >= 0 && note <= 127)
-    if (!notes.length) return
-    let stale = false
-    lumiQueue.current = lumiQueue.current.then(async () => {
-      if (stale) return
-      try {
-        const count = await invoke('set_lumi_cue', { notes })
-        if (!stale) setLumiStatus('Sent cue to ' + count + ' MIDI output(s)')
-      } catch (error) {
-        if (!stale) setLumiStatus(String(error))
-      }
-    })
-    return () => {
-      stale = true
-      lumiQueue.current = lumiQueue.current.then(() =>
-        invoke('set_lumi_cue', { notes: [] }).catch(() => {}),
-      )
-    }
-  }, [lumiCues, mode, paused, completed, playableTimeline, currentNoteIndex])
+    controller.setNotes(notes)
+    return () => { controller.clear() }
+  }, [lumiCues, mode, paused, completed, playableTimeline, currentNoteIndex, cueRevision])
 
   // Probe MIDI on mount (skipped on mobile: microphone is the only input)
   useEffect(() => {
@@ -676,6 +678,7 @@ function App() {
     const idx = currentNoteIndexRef.current
     const target = tl[idx]
     if (!target) return
+    setCueRevision((revision) => revision + 1)
     const next = tl[idx + 1]
     const anyOct = anyOctaveRef.current
     const now = performance.now()
@@ -713,6 +716,7 @@ function App() {
   const handleNoteOff = useCallback((note) => {
     heldNotesRef.current.delete(note)
     setDetectedNote(heldNotesRef.current.size ? [...heldNotesRef.current].join(' + ') : null)
+    lumiController.current.keyReleased()
   }, [])
 
   // Start Basic Pitch on the microphone. Shared by practice start and by
@@ -743,8 +747,9 @@ function App() {
 
   useEffect(() => {
     setRangeSetup(null)
-    setKeyboardRange(null)
-  }, [selectedDeviceId])
+    const range = loadKeyboardRange(localStorage, setupKey)
+    setRangeCalibration(range ? { ...range, setupKey } : null)
+  }, [setupKey])
 
   useEffect(() => {
     if (mode !== 'idle') setRangeSetup(null)
@@ -1037,6 +1042,20 @@ function App() {
   // ---------------------------------------------------------------------------
   // Listen mode — Tone.js Transport + Sampler for audio, rAF loop for cursor
   // ---------------------------------------------------------------------------
+  function ensureKeyboardReady() {
+    if (needsKeyboardCalibration({ inputMode, fitKeyboard, range: keyboardRange, calibrating: !!rangeSetup })) {
+      setRangeSetup((setup) => setup ?? {})
+      setInputError('Check your lowest and highest keys, then choose Use this range before starting.')
+      return false
+    }
+    if (fitKeyboard && inputMode === 'midi' && keyboardFit.error) {
+      setInputError(keyboardFit.error)
+      return false
+    }
+    setInputError(null)
+    return true
+  }
+
   async function handleListen() {
     if (mode === 'listen') {
       stopToneListenLoop()
@@ -1049,7 +1068,7 @@ function App() {
       return
     }
 
-    if (noteTimeline.length === 0) return
+    if (noteTimeline.length === 0 || !ensureKeyboardReady()) return
 
     const piano = toneSamplerRef.current
     if (!piano) return
@@ -1124,7 +1143,7 @@ function App() {
   // Practice mode
   // ---------------------------------------------------------------------------
   async function handleStartPractice() {
-    if (noteTimeline.length === 0) return
+    if (noteTimeline.length === 0 || !ensureKeyboardReady()) return
     if (inputMode === 'midi') {
       Tone.start().catch((error) => console.error('[Audio] Could not start practice audio:', error))
     }
@@ -1219,6 +1238,11 @@ function App() {
     wrongCountRef.current = 0
     clearTimeout(wrongTimerRef.current)
     wrongTimerRef.current = null
+    if (enabled && !keyboardRange && mode === 'practice') {
+      handleStopPractice()
+      setRangeSetup({})
+      setInputError('Check your lowest and highest keys, then choose Use this range.')
+    }
     setFitKeyboard(enabled)
   }
 
@@ -1600,9 +1624,10 @@ function App() {
                       {' '}Fit to my keyboards
                     </label>
                     {fitKeyboard && !keyboardRange && (
-                      <p>Check your lowest and highest keys once before practice to fit the song to your keyboards.</p>
+                      <p>Check your lowest and highest keys before practice. The confirmed range is remembered for this keyboard setup.</p>
                     )}
                     {keyboardFit.error && <p role="status" className="text-amber-400">{keyboardFit.error}</p>}
+                    {keyboardRange && <p>Recheck the range if you change the hardware octave setting or join/separate keyboards.</p>}
                     {fitActive && (
                       <p role="status">
                         {keyboardFit.adjustedNotes > 0
@@ -1631,8 +1656,15 @@ function App() {
                         </p>
                         {rangeSetup.high !== undefined && (
                           <button type="button" className="underline cursor-pointer mr-3" onClick={() => {
-                            setKeyboardRange(rangeSetup)
+                            if (needsKeyboardCalibration({ inputMode: 'midi', fitKeyboard: true, range: rangeSetup })) {
+                              setInputError('Choose the endpoints of a continuous range of at least 12 keys.')
+                              setRangeSetup({})
+                              return
+                            }
+                            setRangeCalibration({ ...rangeSetup, setupKey })
+                            saveKeyboardRange(localStorage, setupKey, rangeSetup)
                             setRangeSetup(null)
+                            setInputError(null)
                           }}>Use this range</button>
                         )}
                         <button type="button" className="underline cursor-pointer" onClick={() => setRangeSetup(null)}>Cancel</button>
