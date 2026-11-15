@@ -115,6 +115,8 @@ function App() {
 
   // Input state
   const [lumiCues, setLumiCues] = useState(false)
+  const [keyboardRange, setKeyboardRange] = useState(null)
+  const [rangeSetup, setRangeSetup] = useState(null)
   const [lumiStatus, setLumiStatus] = useState('')
   const lumiQueue = useRef(Promise.resolve())
   const [midiSupported, setMidiSupported] = useState(null)
@@ -718,6 +720,15 @@ function App() {
     if (r.complete) startStepWait(currentNoteIndex, r.at ?? performance.now())
   }, [currentNoteIndex]) // eslint-disable-line react-hooks/exhaustive-deps
 
+  useEffect(() => {
+    setRangeSetup(null)
+    setKeyboardRange(null)
+  }, [selectedDeviceId])
+
+  useEffect(() => {
+    if (mode !== 'idle') setRangeSetup(null)
+  }, [mode])
+
   // Use the same MIDI connection for free playing and score practice.
   const needsMidi = !isMobile && inputMode === 'midi' && (mode === 'idle' || mode === 'practice')
   useEffect(() => {
@@ -729,6 +740,17 @@ function App() {
       (note) => {
         if (cancelled) return
         playMidiKey(note)
+        if (modeRef.current === 'idle') {
+          const pitch = noteNameToMidi(note)
+          if (pitch !== null) {
+            setRangeSetup((setup) => {
+              if (!setup || setup.high !== undefined) return setup
+              if (setup.low === undefined) return { low: pitch }
+              if (pitch <= setup.low) return { ...setup, invalid: true }
+              return { low: setup.low, high: pitch }
+            })
+          }
+        }
         if (modeRef.current !== 'practice' || completedRef.current || pausedRef.current) return
         heldNotesRef.current.add(note)
         setDetectedNote([...heldNotesRef.current].join(' + '))
@@ -1206,6 +1228,14 @@ function App() {
   // Derived display values
   // ---------------------------------------------------------------------------
   const currentEntry = noteTimeline[currentNoteIndex]
+  const rangeLabel = (pitch) => {
+    const names = ['C', 'C♯', 'D', 'E♭', 'E', 'F', 'F♯', 'G', 'A♭', 'A', 'B♭', 'B']
+    return names[pitch % 12] + (Math.floor(pitch / 12) - 1) + ' (MIDI ' + pitch + ')'
+  }
+  const outsideRange = keyboardRange && currentEntry
+    ? currentEntry.notes.map(noteNameToMidi).filter((pitch) =>
+        pitch !== null && (pitch < keyboardRange.low || pitch > keyboardRange.high))
+    : []
   const currentNoteDisplay = currentEntry ? currentEntry.notes.join(' + ') : '---'
   const totalMeasures = noteTimeline.length > 0 ? noteTimeline[noteTimeline.length - 1].measure : 0
   const isMatch = mode === 'practice' && detectedNote && currentEntry &&
@@ -1528,6 +1558,44 @@ function App() {
                   {' '}LUMI key cues (experimental)
                 </label>
                 {lumiCues && lumiStatus && <p role="status">{lumiStatus}</p>}
+                {inputMode === 'midi' && selectedDeviceId && (
+                  <div className="mt-2">
+                    {keyboardRange && <p>Keyboard range: {rangeLabel(keyboardRange.low)} to {rangeLabel(keyboardRange.high)}</p>}
+                    {mode === 'idle' && !rangeSetup && (
+                      <button type="button" className="underline cursor-pointer"
+                        onClick={() => setRangeSetup({})}>
+                        {keyboardRange ? 'Recheck keyboard range' : 'Check keyboard range'}
+                      </button>
+                    )}
+                    {mode === 'idle' && rangeSetup && (
+                      <>
+                        <p aria-live="polite">
+                          {rangeSetup.high !== undefined
+                            ? rangeLabel(rangeSetup.low) + ' to ' + rangeLabel(rangeSetup.high)
+                            : rangeSetup.low === undefined
+                              ? 'Press the lowest key on your playing surface.'
+                              : rangeSetup.invalid
+                                ? 'That note is at or below the first note. Press the highest key.'
+                                : 'Press the highest key on your playing surface.'}
+                        </p>
+                        {rangeSetup.high !== undefined && (
+                          <button type="button" className="underline cursor-pointer mr-3" onClick={() => {
+                            setKeyboardRange(rangeSetup)
+                            setRangeSetup(null)
+                          }}>Use this range</button>
+                        )}
+                        <button type="button" className="underline cursor-pointer" onClick={() => setRangeSetup(null)}>Cancel</button>
+                      </>
+                    )}
+                    {lumiCues && mode === 'practice' && !completed && outsideRange.length > 0 && (
+                      <p role="status" className="text-amber-400">
+                        Outside the checked keyboard range: {outsideRange.map(rangeLabel).join(', ')}.
+                        No key can light for those notes at this octave setting.
+                        If you shift octaves, stop practice and recheck the range.
+                      </p>
+                    )}
+                  </div>
+                )}
               </div>
             )}
             {inputError && (
