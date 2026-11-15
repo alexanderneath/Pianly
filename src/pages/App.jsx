@@ -142,7 +142,6 @@ function App() {
   const listenTotalMusicalSecRef = useRef(0) // total musical duration (at original tempo)
   const vrvCursorScheduleRef = useRef(null) // [{tstampMs, ids[]}] — cursor highlight events
 
-  const stopListenerRef = useRef(null)
   const stopMicRef = useRef(null)
   const wrongTimerRef = useRef(null)
   const musicXmlRef = useRef(null)
@@ -634,11 +633,16 @@ function App() {
     micHeardRef.current = new Set()
   }
 
-  const playPracticeKey = useCallback((name) => {
-    if (modeRef.current !== 'practice' || completedRef.current || pausedRef.current) return
+  const playMidiKey = useCallback((name) => {
     const pitch = noteNameToMidi(name)
     if (pitch === null) return
-    toneSamplerRef.current?.start({ note: pitch, time: Tone.now(), duration: 0.45 })
+    const play = () => {
+      if (modeRef.current !== 'idle' &&
+          (modeRef.current !== 'practice' || completedRef.current || pausedRef.current)) return
+      toneSamplerRef.current?.start({ note: pitch, time: Tone.now(), duration: 0.45 })
+    }
+    if (Tone.getContext().state === 'running') play()
+    else Tone.start().then(play).catch((error) => console.error('[Audio] MIDI playback:', error))
   }, [])
 
   // A key press (MIDI note-on, or a note newly heard by the mic).
@@ -714,39 +718,54 @@ function App() {
     if (r.complete) startStepWait(currentNoteIndex, r.at ?? performance.now())
   }, [currentNoteIndex]) // eslint-disable-line react-hooks/exhaustive-deps
 
-  // Auto-reconnect MIDI when device changes mid-practice
+  // Use the same MIDI connection for free playing and score practice.
+  const needsMidi = !isMobile && inputMode === 'midi' && (mode === 'idle' || mode === 'practice')
   useEffect(() => {
-    if (mode !== 'practice' || inputMode !== 'midi' || !selectedDeviceId) return
-
-    stopListenerRef.current?.()
-    stopListenerRef.current = null
-
+    if (!needsMidi || !selectedDeviceId) return
     let cancelled = false
-    ;(async () => {
-      const stop = await listenToDevice(
-        selectedDeviceId,
-        (note) => {
-          playPracticeKey(note)
-          heldNotesRef.current.add(note)
-          setDetectedNote([...heldNotesRef.current].join(' + '))
-          handlePress(note)
-        },
-        handleNoteOff,
-      )
+    let disconnect = null
+    listenToDevice(
+      selectedDeviceId,
+      (note) => {
+        if (cancelled) return
+        playMidiKey(note)
+        if (modeRef.current !== 'practice' || completedRef.current || pausedRef.current) return
+        heldNotesRef.current.add(note)
+        setDetectedNote([...heldNotesRef.current].join(' + '))
+        handlePress(note)
+      },
+      (note) => {
+        if (!cancelled && modeRef.current === 'practice') handleNoteOff(note)
+      },
+    ).then((stop) => {
       if (cancelled) { stop?.(); return }
-      if (stop) {
-        stopListenerRef.current = stop
-        setInputError(null)
-      }
-    })()
+      disconnect = stop
+      setInputError(stop ? null : 'Failed to connect to MIDI device. Try reconnecting.')
+    })
+    return () => {
+      cancelled = true
+      disconnect?.()
+      heldNotesRef.current.clear()
+    }
+  }, [needsMidi, selectedDeviceId, handlePress, handleNoteOff, playMidiKey])
 
-    return () => { cancelled = true }
-  }, [selectedDeviceId, mode, inputMode, handlePress, handleNoteOff, playPracticeKey])
+  useEffect(() => {
+    if (!needsMidi) return
+    const unlockAudio = () => {
+      Tone.start().catch((error) => console.error('[Audio] Could not start MIDI audio:', error))
+    }
+    window.addEventListener('pointerdown', unlockAudio, { once: true })
+    window.addEventListener('keydown', unlockAudio, { once: true })
+    return () => {
+      window.removeEventListener('pointerdown', unlockAudio)
+      window.removeEventListener('keydown', unlockAudio)
+    }
+  }, [needsMidi])
 
   // Cleanup on unmount
   useEffect(() => {
     return () => {
-      stopListenerRef.current?.()
+
       stopMicRef.current?.()
       clearTimeout(wrongTimerRef.current)
     }
@@ -792,8 +811,8 @@ function App() {
   }
 
   function stopAllInputs() {
-    stopListenerRef.current?.()
-    stopListenerRef.current = null
+
+
     stopMicRef.current?.()
     stopMicRef.current = null
     clearTimeout(wrongTimerRef.current)
@@ -1086,22 +1105,6 @@ function App() {
         )
         setMode('idle')
         return
-      }
-      const stop = await listenToDevice(
-        selectedDeviceId,
-        (note) => {
-          playPracticeKey(note)
-          heldNotesRef.current.add(note)
-          setDetectedNote([...heldNotesRef.current].join(' + '))
-          handlePress(note)
-        },
-        handleNoteOff,
-      )
-      if (stop) {
-        stopListenerRef.current = stop
-      } else {
-        setInputError('Failed to connect to MIDI device. Try reconnecting.')
-        setMode('idle')
       }
     } else {
       try {
