@@ -1,3 +1,4 @@
+import { invoke } from '@tauri-apps/api/core'
 import { useState, useRef, useEffect, useCallback } from 'react'
 import { unzipSync } from 'fflate'
 import createVerovioModule from 'verovio/wasm'
@@ -113,6 +114,9 @@ function App() {
   const [showMicPrompt, setShowMicPrompt] = useState(false)
 
   // Input state
+  const [lumiCues, setLumiCues] = useState(false)
+  const [lumiStatus, setLumiStatus] = useState('')
+  const lumiQueue = useRef(Promise.resolve())
   const [midiSupported, setMidiSupported] = useState(null)
   const [midiDevices, setMidiDevices] = useState([])
   const [selectedDeviceId, setSelectedDeviceId] = useState(null)
@@ -280,6 +284,30 @@ function App() {
     }
     checkMicPermission()
   }, [inputMode])
+
+  useEffect(() => {
+    if (!lumiCues || isMobile || mode !== 'practice' || paused || completed) return
+    const notes = (noteTimeline[currentNoteIndex]?.notes ?? [])
+      .map(noteNameToMidi)
+      .filter((note) => Number.isInteger(note) && note >= 0 && note <= 127)
+    if (!notes.length) return
+    let stale = false
+    lumiQueue.current = lumiQueue.current.then(async () => {
+      if (stale) return
+      try {
+        const count = await invoke('set_lumi_cue', { notes })
+        if (!stale) setLumiStatus('Sent cue to ' + count + ' MIDI output(s)')
+      } catch (error) {
+        if (!stale) setLumiStatus(String(error))
+      }
+    })
+    return () => {
+      stale = true
+      lumiQueue.current = lumiQueue.current.then(() =>
+        invoke('set_lumi_cue', { notes: [] }).catch(() => {}),
+      )
+    }
+  }, [lumiCues, mode, paused, completed, noteTimeline, currentNoteIndex])
 
   // Probe MIDI on mount (skipped on mobile: microphone is the only input)
   useEffect(() => {
@@ -1475,6 +1503,18 @@ function App() {
             </div>
 
             {/* Input error */}
+            {!isMobile && (
+              <div className="text-sm" style={{color:'var(--sub)'}}>
+                <label>
+                  <input type="checkbox" checked={lumiCues} onChange={(event) => {
+                    setLumiCues(event.target.checked)
+                    setLumiStatus('')
+                  }} />
+                  {' '}LUMI key cues (experimental)
+                </label>
+                {lumiCues && lumiStatus && <p role="status">{lumiStatus}</p>}
+              </div>
+            )}
             {inputError && (
               <div className="w-full max-w-4xl mb-4 px-4 py-3 rounded-xl bg-red-500/10 border border-red-500/30 text-red-300 text-sm">
                 {inputError}
